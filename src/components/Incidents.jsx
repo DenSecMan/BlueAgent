@@ -214,7 +214,27 @@ function SevenAIView({ comments, loading, review }) {
   )
 }
 
-function buildContext(inc, owner, desc, labels, entities, comments) {
+function scoreKey(type, value) {
+  return `${String(type).toLowerCase()}|${String(value).toLowerCase()}`
+}
+
+function scoreBand(score) {
+  if (score >= 76) return 'malicious'
+  if (score >= 51) return 'likely-malicious'
+  if (score >= 26) return 'suspicious'
+  return 'benign'
+}
+
+function entityScoreKey(e) {
+  const t = entityType(e)
+  if (t === 'ip')                  return scoreKey('ip',     e.Address ?? e.address ?? '')
+  if (t === 'dns')                 return scoreKey('domain', e.DomainName ?? e.domainName ?? '')
+  if (t === 'url')                 return scoreKey('url',    e.Url ?? e.url ?? '')
+  if (t === 'filehash')            return scoreKey('hash',   e.Value ?? e.value ?? '')
+  return null
+}
+
+function buildContext(inc, owner, desc, labels, entities, comments, alerts = [], entityScores = []) {
   const lines = []
   lines.push(`INCIDENT #${inc.IncidentNumber}: ${inc.Title}`)
   lines.push(`Severity : ${inc.Severity ?? '—'}`)
@@ -228,6 +248,26 @@ function buildContext(inc, owner, desc, labels, entities, comments) {
     lines.push(desc)
   }
 
+  if (labels.length > 0) {
+    lines.push('')
+    lines.push('── LABELS ───────────────────────────────────')
+    lines.push(labels.map(l => typeof l === 'string' ? l : l.labelName ?? JSON.stringify(l)).join(', '))
+  }
+
+  if (alerts.length > 0) {
+    lines.push('')
+    lines.push('── ALERTS ───────────────────────────────────')
+    alerts.forEach(a => {
+      lines.push(`[${a.AlertSeverity ?? '—'}] ${a.AlertName ?? '(unnamed)'} — ${a.ProviderName ?? a.VendorName ?? '—'}`)
+      if (a.Description) lines.push(`  Description: ${String(a.Description).slice(0, 600)}`)
+      if (a.Tactics)     lines.push(`  Tactics:    ${a.Tactics}`)
+      if (a.Techniques)  lines.push(`  Techniques: ${a.Techniques}`)
+      if (a.StartTime)   lines.push(`  Start:      ${formatDate(a.StartTime)}`)
+      if (a.EndTime)     lines.push(`  End:        ${formatDate(a.EndTime)}`)
+    })
+  }
+
+  const scoreByKey = new Map(entityScores.map(s => [scoreKey(s.type, s.value), s]))
   const seen = new Set()
   const knownEntities = entities.filter(e => {
     if (entityType(e) === 'unknown') return false
@@ -240,55 +280,40 @@ function buildContext(inc, owner, desc, labels, entities, comments) {
     lines.push('')
     lines.push('── ENTITIES ─────────────────────────────────')
     knownEntities.forEach(e => {
-      const type = entityType(e)
-      lines.push(`[${type.toUpperCase()}] ${entityValue(e)}`)
+      const type  = entityType(e)
+      const value = entityValue(e)
+      const k     = entityScoreKey(e)
+      const s     = k ? scoreByKey.get(k) : null
+      const tag   = s ? ` — ${s.score}/100 ${s.classification}` : ''
+      lines.push(`[${type.toUpperCase()}] ${value}${tag}`)
+      if (s?.summary) lines.push(`  ↳ ${s.summary}`)
+    })
+  }
+
+  const sevenAIComments = comments.filter(c => {
+    const author = c.author?.name || c.author?.email || c.author?.objectId || ''
+    return author.toLowerCase().includes(SEVEN_AI_AUTHOR.toLowerCase())
+  })
+  if (sevenAIComments.length > 0) {
+    lines.push('')
+    lines.push('── 7AI COMMENTS ─────────────────────────────')
+    sevenAIComments.forEach((c, i) => {
+      const time = c.createdTimeUtc || c.lastModifiedTimeUtc || ''
+      const msg  = String(c.message || c.body || '').slice(0, 4000)
+      lines.push(`[${i + 1}] ${time ? formatDate(time) : '—'}`)
+      lines.push(msg)
     })
   }
 
   return lines.join('\n')
 }
 
-function ThreatIntelView({ review, entities, rawContext, entitiesLoading }) {
-  const [open, setOpen]       = useState(true)
-  const [rawOpen, setRawOpen] = useState(false)
-
-  const actionable = entities.filter(e => ['ip', 'dns', 'url', 'file'].includes(entityType(e)))
+function ContextView({ rawContext }) {
+  const [rawOpen, setRawOpen] = useState(true)
 
   return (
     <div className="context-preview">
       <div className="threat-review">
-        <button className="sevenai-collapse-btn" onClick={() => setOpen(o => !o)}>
-          <div className="threat-review-header">
-            <span className="threat-review-title">◈ Threat Intel Analysis</span>
-            <span className="sevenai-review-header-right">
-              {review.loading && <span className="sevenai-review-loading">Analysing…</span>}
-              <span className="comments-chevron">{open ? '▲' : '▼'}</span>
-            </span>
-          </div>
-        </button>
-        {open && (
-          <>
-            {review.loading && (
-              <div className="sevenai-review-body muted">
-                Running threat intelligence checks on {actionable.length} entit{actionable.length === 1 ? 'y' : 'ies'}…
-              </div>
-            )}
-            {!review.loading && review.text && (
-              <div className="sevenai-review-body">
-                <ReactMarkdown>{review.text}</ReactMarkdown>
-              </div>
-            )}
-            {!review.loading && !review.text && actionable.length === 0 && !entitiesLoading && (
-              <div className="sevenai-review-body muted">No actionable threat intel entities (IPs, domains, URLs, file hashes) found in this incident.</div>
-            )}
-            {!review.loading && !review.text && review.error && (
-              <div className="sevenai-review-body muted">{review.error}</div>
-            )}
-          </>
-        )}
-      </div>
-
-      <div className="threat-review" style={{ marginTop: 8 }}>
         <button className="sevenai-collapse-btn" onClick={() => setRawOpen(o => !o)}>
           <div className="threat-review-header">
             <span className="threat-review-title" style={{ color: 'var(--text-dim)' }}>◫ Raw Incident Context</span>
@@ -296,43 +321,40 @@ function ThreatIntelView({ review, entities, rawContext, entitiesLoading }) {
           </div>
         </button>
         {rawOpen && (
-          <pre className="context-pre" style={{ margin: '8px 14px 10px' }}>
-            {rawContext}
-            {review.text ? `\n\n── THREAT INTEL ASSESSMENT ──────────────────────────────\n${review.text}` : ''}
-          </pre>
+          <pre className="context-pre" style={{ margin: '8px 14px 10px' }}>{rawContext}</pre>
         )}
       </div>
     </div>
   )
 }
 
-export function IncidentDetail({ selected, onClose, onInvestigate, onContextReady }) {
+export function IncidentDetail({ selected, onClose, onInvestigate, onInvestigationReady, suggestedPrompts = [], suggesting = false, onPromptClick }) {
   const [entities, setEntities]               = useState([])
   const [entitiesLoading, setEntitiesLoading] = useState(false)
+  const [alerts, setAlerts]                   = useState([])
   const [comments, setComments]               = useState([])
   const [commentsLoading, setCommentsLoading] = useState(false)
   const [commentsOpen, setCommentsOpen]       = useState(true)
   const [entitiesOpen, setEntitiesOpen]       = useState(true)
   const [view, setView]                       = useState(null) // null | 'context' | '7ai'
   const [sevenAIReview, setSevenAIReview]     = useState({ loading: false, text: null })
-  const [threatIntelReview, setThreatIntelReview] = useState({ loading: false, text: null, error: null })
+  const [entityScores, setEntityScores]       = useState([])
+  const [investigating, setInvestigating]     = useState(false)
   const prevNumRef              = useRef(null)
   const reviewTriggeredRef      = useRef(false)
-  const threatIntelTriggeredRef = useRef(false)
   const rawContextRef           = useRef('')
-  const onContextReadyRef       = useRef(onContextReady)
   const viewRef                 = useRef(null)
 
   useEffect(() => {
-    if (!selected) { setEntities([]); setComments([]); return }
+    if (!selected) { setEntities([]); setComments([]); setAlerts([]); setEntityScores([]); return }
     if (selected.IncidentNumber === prevNumRef.current) return
     prevNumRef.current = selected.IncidentNumber
     viewRef.current = null
     setView(null)
     setSevenAIReview({ loading: false, text: null })
-    setThreatIntelReview({ loading: false, text: null, error: null })
     reviewTriggeredRef.current = false
-    threatIntelTriggeredRef.current = false
+    setEntityScores([])
+    setInvestigating(false)
 
     setEntities([])
     setEntitiesLoading(true)
@@ -341,6 +363,12 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
       .then(d => setEntities(Array.isArray(d.entities) ? d.entities : []))
       .catch(() => setEntities([]))
       .finally(() => setEntitiesLoading(false))
+
+    setAlerts([])
+    fetch(`/api/incidents/${selected.IncidentNumber}/alerts`)
+      .then(r => r.json())
+      .then(d => setAlerts(Array.isArray(d.alerts) ? d.alerts : []))
+      .catch(() => setAlerts([]))
 
     setComments([])
     setCommentsLoading(true)
@@ -377,47 +405,6 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
       .catch(() => setSevenAIReview({ loading: false, text: null, error: 'Could not reach the API server.' }))
   }, [view, commentsLoading, comments])
 
-  useEffect(() => {
-    onContextReadyRef.current = onContextReady
-  }, [onContextReady])
-
-  useEffect(() => {
-    if (viewRef.current !== 'context' || entitiesLoading || threatIntelTriggeredRef.current) return
-
-    threatIntelTriggeredRef.current = true
-
-    const actionable = entities.filter(e => ['ip', 'dns', 'url', 'file'].includes(entityType(e)))
-
-    if (actionable.length === 0) {
-      onContextReadyRef.current?.({ number: selected.IncidentNumber, title: selected.Title, rawContext: rawContextRef.current })
-      return
-    }
-
-    setThreatIntelReview({ loading: true, text: null, error: null })
-
-    const entityLines = actionable.map(e => `- [${entityType(e).toUpperCase()}] ${entityValue(e)}`).join('\n')
-    const prompt = `Assess the following entities extracted from security incident #${selected.IncidentNumber} ("${selected.Title}"). For each entity that warrants threat intelligence, call the appropriate tools and summarise findings concisely.\n\nEntities:\n${entityLines}`
-
-    fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: [{ role: 'user', text: prompt }] }),
-    })
-      .then(r => r.json())
-      .then(d => {
-        const text = d.error ? null : d.reply
-        setThreatIntelReview({ loading: false, text, error: d.error ?? null })
-        const fullContext = text
-          ? `${rawContextRef.current}\n\n── THREAT INTEL ASSESSMENT ──────────────────────────────\n${text}`
-          : rawContextRef.current
-        onContextReadyRef.current?.({ number: selected.IncidentNumber, title: selected.Title, rawContext: fullContext })
-      })
-      .catch(() => {
-        setThreatIntelReview({ loading: false, text: null, error: 'Could not reach the API server.' })
-        onContextReadyRef.current?.({ number: selected.IncidentNumber, title: selected.Title, rawContext: rawContextRef.current })
-      })
-  }, [view, entitiesLoading, entities, selected])
-
   if (!selected) {
     return (
       <div className="incident-detail">
@@ -432,7 +419,40 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
   const labels = parseJsonArray(selected.Labels ?? selected.labels)
   const desc   = (typeof selected.Description === 'string' ? selected.Description : '') || ''
   const owner  = parseOwner(selected.Owner)
-  rawContextRef.current = buildContext(selected, owner, desc, labels, entities, comments)
+  rawContextRef.current = buildContext(selected, owner, desc, labels, entities, comments, alerts, entityScores)
+
+  const runInvestigation = async () => {
+    if (investigating) return
+    const num = selected.IncidentNumber
+    onInvestigate?.()
+    setInvestigating(true)
+    try {
+      const initialContext = buildContext(selected, owner, desc, labels, entities, comments, alerts, [])
+      const res  = await fetch(`/api/investigate/${num}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ incidentContext: initialContext }),
+      })
+      const data = await res.json()
+      if (data.error) {
+        onInvestigationReady?.({ error: data.error })
+        return
+      }
+      const scores = Array.isArray(data.entityScores) ? data.entityScores : []
+      setEntityScores(scores)
+      const fullContext = buildContext(selected, owner, desc, labels, entities, comments, alerts, scores)
+      onInvestigationReady?.({
+        incidentNumber: num,
+        fullContext,
+        prompts:    Array.isArray(data.prompts) ? data.prompts : [],
+        threatIntel: data.threatIntel ?? null,
+      })
+    } catch (err) {
+      onInvestigationReady?.({ error: err.message || 'Investigation failed' })
+    } finally {
+      setInvestigating(false)
+    }
+  }
 
   return (
     <div className="incident-detail">
@@ -449,8 +469,12 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
       </div>
 
       <div className="detail-btn-row">
-        <button className="investigate-btn" onClick={() => onInvestigate?.(rawContextRef.current)}>
-          ◈ AI INVESTIGATION
+        <button
+          className="investigate-btn"
+          onClick={runInvestigation}
+          disabled={investigating || entitiesLoading || commentsLoading}
+        >
+          {investigating ? '◈ ANALYSING…' : '◈ AI INVESTIGATION'}
         </button>
         <button
           className={`context-btn${view === '7ai' ? ' context-btn-active' : ''}`}
@@ -467,12 +491,7 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
       </div>
 
       {view === 'context' ? (
-        <ThreatIntelView
-          review={threatIntelReview}
-          entities={entities}
-          rawContext={buildContext(selected, owner, desc, labels, entities, comments)}
-          entitiesLoading={entitiesLoading}
-        />
+        <ContextView rawContext={rawContextRef.current} />
       ) : view === '7ai' ? (
         <SevenAIView comments={comments} loading={commentsLoading} review={sevenAIReview} />
       ) : (
@@ -532,6 +551,7 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
                 {(() => {
                   const known   = entities.filter(e => entityType(e) !== 'unknown')
                   const unknownCount = entities.length - known.length
+                  const scoreByKey  = new Map(entityScores.map(s => [scoreKey(s.type, s.value), s]))
                   return (
                     <>
                       {unknownCount > 0 && (
@@ -545,13 +565,25 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
                       )}
                       {known.slice(0, 10).map((e, i) => {
                         const type = entityType(e)
+                        const k    = entityScoreKey(e)
+                        const s    = k ? scoreByKey.get(k) : null
+                        const cls  = s ? `score-${scoreBand(s.score)}` : ''
                         return (
-                          <div key={i} className="entity-row">
+                          <div key={i} className="entity-row" title={s?.summary || ''}>
                             <span className="entity-icon">{entityIcon(type)}</span>
                             <div className="entity-body">
                               <span className="entity-type">{type.toUpperCase()}</span>
                               <span className="entity-value">{entityValue(e)}</span>
                             </div>
+                            {s && (
+                              <span className={`entity-score-badge ${cls}`}>
+                                <span className="entity-score-num">{s.score}</span>
+                                <span className="entity-score-label">{s.classification}</span>
+                              </span>
+                            )}
+                            {!s && investigating && k && (
+                              <span className="entity-score-badge score-pending">…</span>
+                            )}
                           </div>
                         )
                       })}
@@ -606,6 +638,24 @@ export function IncidentDetail({ selected, onClose, onInvestigate, onContextRead
               >
                 ↗ Open in Azure Portal
               </a>
+            </div>
+          )}
+
+          {(suggestedPrompts.length > 0 || suggesting) && (
+            <div className="detail-section">
+              <div className="detail-section-label">{suggesting ? 'Suggested (refreshing…)' : 'Suggested Prompts'}</div>
+              <div className="detail-suggested">
+                {suggestedPrompts.map((p, i) => (
+                  <button
+                    key={i}
+                    className="chip chip-block"
+                    title={p}
+                    onClick={() => onPromptClick?.(p)}
+                  >
+                    {p}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
         </>

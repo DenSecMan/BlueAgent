@@ -630,6 +630,42 @@
   cursor: not-allowed;
 }
 
+.detail-suggested {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chip.chip-block {
+  max-width: 100%;
+  white-space: normal;
+  text-align: left;
+  border-radius: 8px;
+  padding: 8px 12px;
+  line-height: 1.35;
+}
+
+.entity-score-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.entity-score-num   { font-weight: 700; font-feature-settings: "tnum"; }
+.entity-score-label { text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+
+.entity-score-badge.score-benign           { background: rgba(46,160,67,0.12);  border-color: rgba(46,160,67,0.45);  color: #4ade80; }
+.entity-score-badge.score-suspicious       { background: rgba(245,158,11,0.12); border-color: rgba(245,158,11,0.45); color: #fbbf24; }
+.entity-score-badge.score-likely-malicious { background: rgba(249,115,22,0.12); border-color: rgba(249,115,22,0.45); color: #fb923c; }
+.entity-score-badge.score-malicious        { background: rgba(239,68,68,0.15);  border-color: rgba(239,68,68,0.55);  color: #f87171; }
+.entity-score-badge.score-pending          { color: var(--text-dim); opacity: 0.7; }
+
 .chat-input-row {
   display: flex;
   gap: 8px;

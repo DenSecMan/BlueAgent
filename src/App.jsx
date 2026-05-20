@@ -53,7 +53,7 @@ function CommandPicker({ commands, activeIdx, onSelect }) {
   )
 }
 
-function ChatPanel({ incidentContext, expandRef }) {
+function ChatPanel({ expandRef, setSuggestedPrompts, setSuggesting }) {
   const [height, setHeight]     = useState(CHAT_DEFAULT)
   const [expanded, setExpanded] = useState(true)
   const [messages, setMessages] = useState(INITIAL_MESSAGES)
@@ -61,18 +61,15 @@ function ChatPanel({ incidentContext, expandRef }) {
   const [loading, setLoading]   = useState(false)
   const [showCmds, setShowCmds] = useState(false)
   const [cmdIdx, setCmdIdx]     = useState(0)
-  const [suggestedPrompts, setSuggestedPrompts] = useState([])
-  const [suggesting, setSuggesting] = useState(false)
 
   const [pendingImages, setPendingImages] = useState([])
-  const incidentContextRef = useRef(incidentContext)
-  useEffect(() => { incidentContextRef.current = incidentContext }, [incidentContext])
 
   const startY      = useRef(0)
   const startH      = useRef(0)
   const bottomRef   = useRef(null)
-  const prevCtxRef  = useRef(null)
   const fileInputRef = useRef(null)
+  const sendTextRef  = useRef(null)
+  const investigationRef = useRef(null) // { number, rawContext } stored after investigation, used by refreshSuggestions
   const historyRef  = useRef([])   // sent user messages
   const histIdxRef  = useRef(-1)   // -1 = not browsing history
   const draftRef    = useRef('')   // saved draft while browsing history
@@ -81,51 +78,17 @@ function ChatPanel({ incidentContext, expandRef }) {
     if (!expandRef) return
     expandRef.current = {
       expand: () => { setHeight(CHAT_DEFAULT); setExpanded(true) },
-      startInvestigation: async (incidentNumber, rawContext) => {
+      sendPrompt: (text) => { setHeight(CHAT_DEFAULT); setExpanded(true); sendTextRef.current?.(text) },
+      reset: () => {
+        investigationRef.current = null
+        setMessages(INITIAL_MESSAGES)
+        setInput('')
+        setPendingImages([])
+        setLoading(false)
+      },
+      applyInvestigation: ({ incidentNumber, fullContext }) => {
         setHeight(CHAT_DEFAULT); setExpanded(true)
-        if (!incidentNumber || !rawContext) return
-        setLoading(true)
-        setSuggestedPrompts([])
-        setMessages(prev => [...prev, {
-          role: 'ai',
-          agent: 'blueagent',
-          agentLabel: 'BlueAgent',
-          text: `Starting AI investigation for incident #${incidentNumber} — analysing entities and generating suggested prompts…`,
-        }])
-        try {
-          const res  = await fetch(`/api/investigate/${incidentNumber}`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ incidentContext: rawContext }),
-          })
-          const data = await res.json()
-          if (data.error) {
-            setMessages(prev => [...prev, { role: 'ai', text: `ERROR: ${data.error}` }])
-          } else {
-            if (data.threatIntel) {
-              setMessages(prev => [...prev, {
-                role:       'ai',
-                agent:      data.threatIntelAgent      ?? 'threat_analyst',
-                agentLabel: data.threatIntelAgentLabel ?? 'Threat Analyst',
-                text:       data.threatIntel,
-              }])
-            } else {
-              setMessages(prev => [...prev, {
-                role: 'ai',
-                agent: 'blueagent',
-                agentLabel: 'BlueAgent',
-                text: data.entitiesCount === 0
-                  ? 'No entities found on this incident — skipping threat intel.'
-                  : 'Threat intel step produced no output.',
-              }])
-            }
-            if (Array.isArray(data.prompts)) setSuggestedPrompts(data.prompts)
-          }
-        } catch {
-          setMessages(prev => [...prev, { role: 'ai', text: 'ERROR: Could not reach the API server.' }])
-        } finally {
-          setLoading(false)
-        }
+        investigationRef.current = { number: incidentNumber, rawContext: fullContext }
       },
     }
   })
@@ -133,28 +96,6 @@ function ChatPanel({ incidentContext, expandRef }) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
-
-  useEffect(() => {
-    if (!incidentContext) {
-      if (prevCtxRef.current !== null) {
-        prevCtxRef.current = null
-        setMessages(INITIAL_MESSAGES)
-        setSuggestedPrompts([])
-      }
-      return
-    }
-    if (incidentContext.number !== prevCtxRef.current) {
-      prevCtxRef.current = incidentContext.number
-      setMessages([
-        ...INITIAL_MESSAGES,
-        {
-          role: 'ai',
-          text: `Context loaded for Incident #${incidentContext.number}.\n\n\`\`\`\n${incidentContext.rawContext}\n\`\`\`\n\nAsk me anything about this incident.`,
-        },
-      ])
-      setSuggestedPrompts([])
-    }
-  }, [incidentContext])
 
   const onDragStart = useCallback((e) => {
     startY.current = e.clientY
@@ -283,7 +224,7 @@ function ChatPanel({ incidentContext, expandRef }) {
   }
 
   const refreshSuggestions = async (msgs) => {
-    const ctx = incidentContextRef.current
+    const ctx = investigationRef.current
     if (!ctx?.rawContext) return
     setSuggesting(true)
     try {
@@ -325,10 +266,6 @@ function ChatPanel({ incidentContext, expandRef }) {
     histIdxRef.current = -1
     draftRef.current   = ''
 
-    const contextPrefix = incidentContext
-      ? `[Incident context:\n${incidentContext.rawContext}\n]\n`
-      : ''
-
     const userMsg = { role: 'user', text: text || '(image attached)', images: imgs }
     const updated = [...messages, userMsg]
     setMessages(updated)
@@ -338,9 +275,15 @@ function ChatPanel({ incidentContext, expandRef }) {
     setLoading(true)
 
     try {
+      const ctx           = investigationRef.current
+      const contextPrefix = ctx?.rawContext
+        ? `[Incident #${ctx.number} context — silent, do not echo back to the user:\n${ctx.rawContext}\n]\n\n`
+        : ''
       const apiMessages = updated.map((m, idx) => ({
         role: m.role,
-        text: (m.role === 'user' && idx === updated.length - 1) ? contextPrefix + (m.text || '(image attached)') : m.text,
+        text: (m.role === 'user' && idx === updated.length - 1)
+          ? contextPrefix + (m.text || '(image attached)')
+          : m.text,
         ...(m.images ? { images: m.images } : {}),
       }))
       const res  = await fetch('/api/chat', {
@@ -369,6 +312,8 @@ function ChatPanel({ incidentContext, expandRef }) {
 
   const send = () => sendText(input, undefined)
 
+  useEffect(() => { sendTextRef.current = sendText })
+
   return (
     <div className="chat-panel" style={{ height }}>
       <div className="chat-drag-handle" onMouseDown={onDragStart}>
@@ -378,9 +323,6 @@ function ChatPanel({ incidentContext, expandRef }) {
         <span className="chat-title">
           <span className="status-dot" />
           AI Assistant
-          {incidentContext && (
-            <span className="chat-context-badge">#{incidentContext.number}</span>
-          )}
         </span>
         <button className="chat-toggle" onClick={toggle}>{expanded ? '▼' : '▲'}</button>
       </div>
@@ -417,22 +359,6 @@ function ChatPanel({ incidentContext, expandRef }) {
             })}
             <div ref={bottomRef} />
           </div>
-          {(suggestedPrompts.length > 0 || suggesting) && (
-            <div className="chip-row">
-              <span className="chip-row-label">{suggesting ? 'Refreshing…' : 'Suggested:'}</span>
-              {suggestedPrompts.map((p, i) => (
-                <button
-                  key={i}
-                  className="chip"
-                  disabled={loading}
-                  title={p}
-                  onClick={() => sendText(p)}
-                >
-                  {p}
-                </button>
-              ))}
-            </div>
-          )}
           <div className="chat-input-row">
             <div className="chat-input-wrap">
               {showCmds && filteredCmds.length > 0 && (
@@ -457,11 +383,7 @@ function ChatPanel({ incidentContext, expandRef }) {
               )}
               <input
                 className="chat-input"
-                placeholder={
-                  loading         ? 'Processing...' :
-                  incidentContext ? `Ask about #${incidentContext.number}… or type / for commands` :
-                  'Ask anything… or type / for commands'
-                }
+                placeholder={loading ? 'Processing...' : 'Ask anything… or type / for commands'}
                 value={input}
                 disabled={loading}
                 onChange={handleInputChange}
@@ -496,33 +418,42 @@ function ChatPanel({ incidentContext, expandRef }) {
 }
 
 export default function App() {
-  const [activeNav, setActiveNav]             = useState('Dashboard')
+  const [activeNav, setActiveNav]               = useState('Dashboard')
   const [selectedIncident, setSelectedIncident] = useState(null)
-  const [incidentContext, setIncidentContext]  = useState(null)
-  const expandChatRef                          = useRef(null)
+  const [suggestedPrompts, setSuggestedPrompts] = useState([])
+  const [suggesting, setSuggesting]             = useState(false)
+  const expandChatRef                           = useRef(null)
+
+  const resetIncidentState = () => {
+    setSuggestedPrompts([])
+    setSuggesting(false)
+    expandChatRef.current?.reset?.()
+  }
 
   const handleSelectIncident = inc => {
-    if (inc?.IncidentNumber !== selectedIncident?.IncidentNumber) {
-      setIncidentContext(null)
-    }
+    if (inc?.IncidentNumber !== selectedIncident?.IncidentNumber) resetIncidentState()
     setSelectedIncident(inc)
   }
 
   const handleCloseIncident = () => {
+    resetIncidentState()
     setSelectedIncident(null)
-    setIncidentContext(null)
   }
 
-  const handleContextReady = useCallback(ctx => {
-    setIncidentContext(ctx)
+  const handleInvestigate = () => {
     expandChatRef.current?.expand?.()
-  }, [])
+    setSuggestedPrompts([])
+    setSuggesting(true)
+  }
 
-  const handleInvestigate = (rawContext) => {
-    expandChatRef.current?.expand?.()
-    const num = selectedIncident?.IncidentNumber
-    const ctx = rawContext || incidentContext?.rawContext
-    if (num && ctx) expandChatRef.current?.startInvestigation?.(num, ctx)
+  const handleInvestigationReady = ({ incidentNumber, fullContext, prompts, error }) => {
+    setSuggesting(false)
+    if (error || !fullContext) {
+      setSuggestedPrompts([])
+      return
+    }
+    expandChatRef.current?.applyInvestigation?.({ incidentNumber, fullContext })
+    setSuggestedPrompts(Array.isArray(prompts) ? prompts : [])
   }
 
   return (
@@ -582,7 +513,11 @@ export default function App() {
               {activeNav === 'Documents' && <Documents />}
               {activeNav === 'Settings'  && <Settings />}
             </main>
-            <ChatPanel incidentContext={incidentContext} expandRef={expandChatRef} />
+            <ChatPanel
+              expandRef={expandChatRef}
+              setSuggestedPrompts={setSuggestedPrompts}
+              setSuggesting={setSuggesting}
+            />
           </div>
 
           {activeNav === 'Incidents' && (
@@ -590,7 +525,10 @@ export default function App() {
               selected={selectedIncident}
               onClose={handleCloseIncident}
               onInvestigate={handleInvestigate}
-              onContextReady={handleContextReady}
+              onInvestigationReady={handleInvestigationReady}
+              suggestedPrompts={suggestedPrompts}
+              suggesting={suggesting}
+              onPromptClick={text => expandChatRef.current?.sendPrompt?.(text)}
             />
           )}
         </div>

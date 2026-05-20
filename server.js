@@ -5,7 +5,7 @@ import { HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { z } from 'zod'
 import { loadRegistry, getAgent, invalidateRegistry } from './agentLoader.js'
 import yaml from 'js-yaml'
-import { runAgent } from './agentRunner.js'
+import { runAgent, invokeTool } from './agentRunner.js'
 import path from 'path'
 import fs from 'fs/promises'
 import { fileURLToPath } from 'url'
@@ -222,41 +222,85 @@ app.get('/api/incidents/:incidentNumber/entities', async (req, res) => {
   }
 })
 
-// Format raw Sentinel entity objects as a natural-language list for threat_analyst.
-function formatEntitiesForAnalysis(entities) {
-  const lines = []
-  for (const e of entities) {
-    if (!e || typeof e !== 'object') continue
-    const t = String(e.Type ?? e.type ?? '').toLowerCase()
-    if (t === 'ip') {
-      const addr = e.Address ?? e.address
-      if (addr) lines.push(`- IP address: ${addr}`)
-    } else if (t === 'account') {
-      const name = e.Name ?? e.name
-      const upn  = e.UPNSuffix ?? e.upnSuffix
-      const full = (name && upn) ? `${name}@${upn}` : (name ?? e.AadUserId ?? e.aadUserId ?? e.Sid ?? e.sid)
-      if (full) lines.push(`- Account: ${full}`)
-    } else if (t === 'host') {
-      const host = e.HostName ?? e.hostName ?? e.NetBiosName ?? e.netBiosName ?? e.DnsDomain ?? e.dnsDomain
-      if (host) lines.push(`- Host: ${host}`)
-    } else if (t === 'file') {
-      if (e.Name ?? e.name) lines.push(`- File: ${e.Name ?? e.name}`)
-    } else if (t === 'filehash' || t === 'file-hash') {
-      const algo = e.Algorithm ?? e.algorithm ?? 'hash'
-      const val  = e.Value ?? e.value
-      if (val) lines.push(`- File hash (${algo}): ${val}`)
-    } else if (t === 'url') {
-      if (e.Url ?? e.url) lines.push(`- URL: ${e.Url ?? e.url}`)
-    } else if (t === 'dnsresolution' || t === 'dns') {
-      if (e.DomainName ?? e.domainName) lines.push(`- Domain: ${e.DomainName ?? e.domainName}`)
-    } else if (t === 'cve' || t === 'vulnerability') {
-      const id = e.CveId ?? e.cveId ?? e.Id ?? e.id
-      if (id) lines.push(`- CVE: ${id}`)
-    } else if (t) {
-      lines.push(`- ${e.Type ?? e.type}: ${JSON.stringify(e).slice(0, 200)}`)
-    }
+// ── Per-entity threat intel scoring ──────────────────────────────────────
+const SCORE_BANDS = [
+  { max: 25,  label: 'Benign' },
+  { max: 50,  label: 'Suspicious' },
+  { max: 75,  label: 'Likely Malicious' },
+  { max: 100, label: 'Malicious' },
+]
+function classify(score) {
+  return SCORE_BANDS.find(b => score <= b.max)?.label ?? 'Unknown'
+}
+
+// Map a raw Sentinel entity to a scoring target (or null if not actionable).
+function scoringTarget(e) {
+  if (!e || typeof e !== 'object') return null
+  const t = String(e.Type ?? e.type ?? '').toLowerCase()
+  if (t === 'ip') {
+    const v = e.Address ?? e.address
+    return v ? { type: 'ip',     value: String(v), tools: ['virustotal', 'abuseipdb', 'alienvault_otx'] } : null
   }
-  return lines.length ? lines.join('\n') : '(no entities)'
+  if (t === 'dnsresolution' || t === 'dns') {
+    const v = e.DomainName ?? e.domainName
+    return v ? { type: 'domain', value: String(v), tools: ['virustotal', 'alienvault_otx'] } : null
+  }
+  if (t === 'url') {
+    const v = e.Url ?? e.url
+    return v ? { type: 'url',    value: String(v), tools: ['virustotal'] } : null
+  }
+  if (t === 'filehash' || t === 'file-hash') {
+    const v = e.Value ?? e.value
+    return v ? { type: 'hash',   value: String(v), tools: ['virustotal', 'alienvault_otx'] } : null
+  }
+  if (t === 'cve' || t === 'vulnerability') {
+    const v = e.CveId ?? e.cveId ?? e.Id ?? e.id
+    return v ? { type: 'cve',    value: String(v), tools: ['nvd_lookup'] } : null
+  }
+  return null
+}
+
+function toolArgsFor(name, target) {
+  if (name === 'abuseipdb')        return { ip: target.value }
+  if (name === 'nvd_lookup')       return { cve_id: target.value }
+  return { query: target.value, type: target.type }
+}
+
+const EntityAssessmentSchema = z.object({
+  score:          z.number().int().min(1).max(100).describe('1 = clearly benign, 100 = confirmed malicious. Anchor to tool evidence: VirusTotal malicious-vendor count, AbuseIPDB abuse_confidence, AlienVault pulse_count and malware_families, NVD CVSS severity.'),
+  classification: z.enum(['Benign', 'Suspicious', 'Likely Malicious', 'Malicious']),
+  summary:        z.string().describe('One or two sentences citing the strongest signal from the tool output. No padding, no recommendations.'),
+})
+
+const entityScorerModel = new AzureChatOpenAI({ ...MODEL_CONFIG, temperature: 0.1 })
+  .withStructuredOutput(EntityAssessmentSchema)
+
+async function assessEntity(target) {
+  const toolResults = {}
+  await Promise.all(target.tools.map(async name => {
+    try {
+      toolResults[name] = await invokeTool(name, toolArgsFor(name, target))
+    } catch (err) {
+      toolResults[name] = { error: err.message }
+    }
+  }))
+
+  const sys = new SystemMessage(
+    `You score a single security indicator on a 1–100 scale (1 = clearly benign, 100 = confirmed malicious). ` +
+    `Anchor to the tool evidence provided — do not speculate.`
+  )
+  const human = new HumanMessage(
+    `Indicator: ${target.type.toUpperCase()} = ${target.value}\n\n` +
+    `Tool results (JSON):\n\`\`\`json\n${JSON.stringify(toolResults, null, 2)}\n\`\`\``
+  )
+
+  log.llmRequest('threat_analyst', `score:${target.type}=${target.value}`, [sys, human])
+  const result = await entityScorerModel.invoke([sys, human])
+  log.llmResponse('threat_analyst', `score:${target.type}=${target.value}`, {
+    content: `score=${result.score} class=${result.classification}`,
+    tool_calls: [],
+  })
+  return { ...result, classification: classify(result.score), toolResults }
 }
 
 // ── Prompty / investigation suggestions ──────────────────────────────────
@@ -286,6 +330,20 @@ async function callPromptyStructured(promptyAgent, humanContent) {
   return result.prompts
 }
 
+// Run async fn(target) over targets with a small concurrency cap.
+async function mapWithLimit(targets, limit, fn) {
+  const out = new Array(targets.length)
+  let i = 0
+  async function worker() {
+    while (i < targets.length) {
+      const idx = i++
+      out[idx] = await fn(targets[idx], idx)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, targets.length) }, worker))
+  return out
+}
+
 app.post('/api/investigate/:incidentNumber', async (req, res) => {
   const incNum = parseInt(req.params.incidentNumber, 10)
   if (isNaN(incNum)) return res.status(400).json({ error: 'Invalid incident number' })
@@ -293,21 +351,37 @@ app.post('/api/investigate/:incidentNumber', async (req, res) => {
     const incidentContext = String(req.body?.incidentContext ?? '').trim()
     if (!incidentContext) return res.status(400).json({ error: 'incidentContext is required' })
 
-    const entities  = await getIncidentEntities(incNum)
-    const entityStr = formatEntitiesForAnalysis(entities)
+    const entities = await getIncidentEntities(incNum)
+    const targets  = entities.map(scoringTarget).filter(Boolean)
 
-    let threatIntel = null
-    if (entities.length > 0) {
-      const threatAgent = await getAgent('threat_analyst')
-      if (threatAgent) {
-        const query = `Analyse the following indicators of compromise extracted from Microsoft Sentinel incident #${incNum} and summarise what threat intelligence sources report for each one:\n\n${entityStr}`
-        try {
-          threatIntel = await runAgent(threatAgent, [{ role: 'user', text: query }])
-        } catch (err) {
-          log.warn('investigate', `threat_analyst failed: ${err.message}`)
-        }
+    const assessments = await mapWithLimit(targets, 4, async target => {
+      try {
+        return { target, result: await assessEntity(target) }
+      } catch (err) {
+        log.warn('investigate', `assessEntity failed for ${target.type}=${target.value}: ${err.message}`)
+        return { target, result: null, error: err.message }
       }
-    }
+    })
+
+    const entityScores = assessments
+      .filter(a => a.result)
+      .map(a => ({
+        type:           a.target.type,
+        value:          a.target.value,
+        score:          a.result.score,
+        classification: a.result.classification,
+        summary:        a.result.summary,
+      }))
+
+    const threatIntel = entityScores.length
+      ? [
+          '## Threat Intel Assessment',
+          ...entityScores
+            .slice()
+            .sort((a, b) => b.score - a.score)
+            .map(s => `- **${s.type.toUpperCase()}** \`${s.value}\` — **${s.score}/100 ${s.classification}** — ${s.summary}`),
+        ].join('\n')
+      : null
 
     const promptyAgent = await getAgent('prompty')
     if (!promptyAgent) return res.status(500).json({ error: 'prompty agent not found' })
@@ -315,7 +389,7 @@ app.post('/api/investigate/:incidentNumber', async (req, res) => {
     const promptyHuman = [
       `## Incident #${incNum} — full context`,
       incidentContext,
-      threatIntel ? `\n## Threat intelligence summary (just produced by Threat Analyst)\n${threatIntel}` : '',
+      threatIntel ? `\n## Threat intelligence summary\n${threatIntel}` : '',
       `\n## Conversation so far`,
       '(This is the start of the investigation — no prior chat messages.)',
       `\nProduce exactly 5 next-step investigation prompts a Tier 3 SOC analyst would ask now, grounded in the specific entities and findings above.`,
@@ -327,8 +401,10 @@ app.post('/api/investigate/:incidentNumber', async (req, res) => {
       threatIntel,
       threatIntelAgent:      'threat_analyst',
       threatIntelAgentLabel: 'Threat Analyst',
+      entityScores,
       prompts,
-      entitiesCount: entities.length,
+      entitiesCount:   entities.length,
+      actionableCount: targets.length,
     })
   } catch (err) {
     log.error('investigate', err.message)
@@ -364,6 +440,39 @@ app.post('/api/suggest', async (req, res) => {
   } catch (err) {
     log.error('suggest', err.message)
     res.status(500).json({ error: err.message })
+  }
+})
+
+// ── Incident alerts (linked SecurityAlert records) ───────────────────────
+app.get('/api/incidents/:incidentNumber/alerts', async (req, res) => {
+  try {
+    const incNum = parseInt(req.params.incidentNumber, 10)
+    if (isNaN(incNum)) return res.json({ alerts: [] })
+
+    const idKql = `SecurityIncident
+| where IncidentNumber == ${incNum}
+| summarize arg_max(TimeGenerated, *) by IncidentNumber
+| extend AlertIds = column_ifexists("AlertIds", "[]")
+| project AlertIds`
+    const idResult = await queryLogAnalytics(idKql, 'P30D')
+    if (!idResult.rows.length) return res.json({ alerts: [] })
+
+    let alertIds = idResult.rows[0][0]
+    if (typeof alertIds === 'string') { try { alertIds = JSON.parse(alertIds) } catch { alertIds = [] } }
+    if (!Array.isArray(alertIds) || !alertIds.length) return res.json({ alerts: [] })
+
+    const idList = alertIds.map(id => `"${id}"`).join(',')
+    const kql = `SecurityAlert
+| where SystemAlertId in (${idList})
+| summarize arg_max(TimeGenerated, *) by SystemAlertId
+| project SystemAlertId, AlertName, AlertSeverity, Description, Tactics, Techniques,
+          StartTime, EndTime, Status, ProviderName, VendorName, ProductName`
+    const { columns, rows } = await queryLogAnalytics(kql, 'P30D')
+    const alerts = rows.map(row => Object.fromEntries(columns.map((c, i) => [c, row[i]])))
+    res.json({ alerts })
+  } catch (err) {
+    log.error('api:alerts', err.message)
+    res.json({ alerts: [] })
   }
 })
 
