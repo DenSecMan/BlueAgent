@@ -417,8 +417,3 @@ export async function runAgent(agentConfig, messages, context = null) {
 
   return runLoop(agentConfig, lcMessages, userQuery)
 }
-
-// Pipeline call: single query string (for LangGraph nodes)
-export async function runPipelineAgent(agentConfig, query, context = null) {
-  return runAgent(agentConfig, [{ role: 'user', text: query }], context)
-}

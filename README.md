@@ -33,14 +33,6 @@ Browser (React/Vite :5173)
   │                                                                     │
   │  writeMemory() caps lesson files at 10 per agent (deletes oldest)  │
   └─────────────────────────────────────────────────────────────────────┘
-
-  Special workflow: research_pipeline
-  ┌──────────────────────────────────────────────┐
-  │  LangGraph                                   │
-  │  researcher (Tavily) → writer → evaluator    │
-  │         ▲                         │          │
-  │         └──── revision loop ──────┘          │
-  └──────────────────────────────────────────────┘
 ```
 
 ### Directory layout
@@ -56,7 +48,6 @@ src/             React frontend (Vite) — multi-page app
 agentLoader.js   Reads & caches the agent registry at startup
 agentRunner.js   MISSION/EXECUTE/EVAL loop, memory read/write, tool invocation
 server.js        Express API + LLM orchestrator
-researchWorkflow.js  LangGraph research pipeline
 ```
 
 ---
@@ -225,13 +216,12 @@ if __name__ == '__main__':
 
 ## Orchestration Workflows
 
-The orchestrator selects one of three workflow types:
+The orchestrator selects one of two workflow types:
 
 | Workflow | Description |
 |---|---|
 | `single` | One agent handles the request |
 | `sequential` | Agents are chained — each receives the previous agent's output as context |
-| `research_pipeline` | LangGraph graph: researcher → writer → evaluator with revision loop |
 
 ---
 
@@ -286,6 +276,5 @@ On every subsequent call the agent reads the **5 most recent** lesson files into
 | API server | Express 5, Node.js |
 | LLM | Azure OpenAI (via `@langchain/openai`) |
 | Agent framework | LangChain (`@langchain/core`) |
-| Pipeline orchestration | LangGraph (`@langchain/langgraph`) |
 | Web search | Tavily REST API |
 | Config format | YAML (`js-yaml`) |

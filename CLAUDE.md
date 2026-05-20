@@ -20,7 +20,6 @@ The Vite dev server proxies `/api/*` to `http://localhost:3001`, so the React ap
 | `server.js` | Express API + LLM orchestrator — entry point for all chat requests |
 | `agentLoader.js` | Reads `agents/*.yaml`, merges `skills/*.md` into system prompts, caches registry |
 | `agentRunner.js` | MISSION/EXECUTE/EVAL loop, memory read/write, tool invocation (JS + Python) |
-| `researchWorkflow.js` | LangGraph pipeline: researcher → writer → evaluator with revision loop |
 | `agents/*.yaml` | One file per agent — name, description, skills, tools, mission, expected, evaluator config |
 | `skills/*.md` | Behavioral guidelines appended to agent system prompts |
 | `tools/*.js` / `tools/*.py` | Callable tools — JS exports `invoke()`, Python reads stdin JSON and writes stdout JSON |
@@ -39,7 +38,7 @@ The Vite dev server proxies `/api/*` to `http://localhost:3001`, so the React ap
 
 **Agent YAML required fields:** `name`, `display_name`, `description`. `system_prompt` is optional — `agentLoader.js` synthesises one from `mission` + `expected` if omitted. The `mission`, `expected`, and `evaluator` block (with `criteria`, `threshold`, `max_retries`) power the eval loop; omit the evaluator block to skip evaluation entirely (e.g. `skill_analyzer`). The `criteria` field should use named sub-criteria with explicit point allocations (`**Name (X–Y pts)**`) and a hard `Fail (score ≤N)` line — the evaluator returns a structured `critique` field that is injected into the retry prompt.
 
-**The eval loop lives entirely in `agentRunner.js`** — `runAgent()` and `runPipelineAgent()` are the two public exports. Do not bypass them by calling the LLM directly inside an agent workflow unless there's a specific reason (the research workflow's evaluator node uses structured output and is the documented exception).
+**The eval loop lives entirely in `agentRunner.js`** — `runAgent()` is the public export. Do not bypass it by calling the LLM directly inside an agent workflow.
 
 ## Module system
 
@@ -56,10 +55,6 @@ All resolved from `.env` via `dotenv/config` (imported at the top of `server.js`
 { "reply": "...", "agent": "comedian", "agentLabel": "Laughbot", "agents": [...], "iterations": 2 }
 ```
 `agentLabel` drives the label shown in the chat bubble. `agents` (array) shows the chain in the `msg-meta` badge. `iterations` shows how many eval cycles ran.
-
-## LangGraph research pipeline
-
-`researchWorkflow.js` compiles a `StateGraph` at module load time. The `writer` node calls `runPipelineAgent()` (gains the eval loop + memory). The `evaluator` node uses `.withStructuredOutput()` directly — it does not go through `runPipelineAgent` because it returns structured JSON, not prose.
 
 ## Patterns to preserve
 
