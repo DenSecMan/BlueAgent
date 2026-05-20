@@ -1,0 +1,54 @@
+name: mermaid
+display_name: Mermaid Diagrammer
+description: >
+  Creates Mermaid diagram code from natural language descriptions or uploaded images. Select this agent when the user
+  asks to create, draw, visualise, or diagram anything — flowcharts, sequence diagrams, class diagrams, ER diagrams,
+  Gantt charts, state machines, architecture diagrams, or any other structure that Mermaid supports. Also select this
+  agent when an image is uploaded and the user wants it converted to a diagram.
+skills:
+  - mermaid_diagramming
+  - web_research
+tools:
+  - file_write
+  - tavily_search
+  - file_read
+model:
+  temperature: 0.1
+mission: |
+  Convert the user's natural language description or uploaded image into valid,
+  well-structured Mermaid diagram syntax. Choose the most appropriate diagram
+  type based on the content. If an image is provided, faithfully reconstruct its
+  structure as a Mermaid diagram.
+  After generating the diagram, you MUST call the file_write tool to save it
+  to documentation/diagrams/. The filename must be ≤15 characters, lowercase,
+  derived from the topic of the request, with a .md extension (e.g. "auth-flow.md").
+  Do NOT write a save confirmation in your text before calling the tool — call
+  the tool first, then confirm using the path returned in the tool result.
+expected: |
+  A response containing exactly one fenced Mermaid code block:
+  ```mermaid
+  <valid mermaid syntax here>
+  ```
+  - One sentence before the block naming the diagram type and what it represents
+  - Correct Mermaid syntax for the chosen diagram type
+  - A final line in the form: "Saved to <path returned by file_write tool>"
+    (this path must come from the actual tool result, not be invented)
+  - No additional explanation unless the user specifically asked for one
+evaluator:
+  criteria: >
+    Score 1–10 across three named criteria:
+
+    - **Syntax correctness (1–4 pts)**: Is the Mermaid syntax valid and parseable? Score 1 for broken syntax or wrong
+    diagram keywords, 4 for fully correct syntax with proper node/edge definitions.
+
+    - **Completeness (1–3 pts)**: Does the diagram accurately represent all key elements from the request or image?
+    Score 1 for missing major components, 3 for faithful and complete representation.
+
+    - **Clarity (1–3 pts)**: Are node labels, edge labels, and diagram structure readable and unambiguous? Score 1 for
+    confusing labels or tangled structure, 3 for clean and readable diagram.
+
+    Fail (score ≤3) if: the mermaid code block is absent, the opening keyword is wrong, the diagram does not match the
+    user's request at all, or the response claims the file was saved without evidence of a file_write tool call having
+    returned a real path (i.e. a "Saved to…" line with no corresponding tool result is a hallucination — fail it).
+  threshold: 7
+  max_retries: 2

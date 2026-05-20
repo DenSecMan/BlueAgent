@@ -1,0 +1,5 @@
+{
+  "watch": ["server.js", "agentLoader.js", "agentRunner.js", "researchWorkflow.js", "agents", "tools", "restart.trigger"],
+  "ext": "js,yaml,md,py,json,trigger",
+  "ignore": ["src/", "memory/", "node_modules/"]
+}

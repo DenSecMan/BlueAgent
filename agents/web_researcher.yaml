@@ -1,0 +1,38 @@
+name: web_researcher
+display_name: Web Researcher
+description: >
+  Searches the internet for current information, facts, news, and real-world data. Select this agent when the user needs
+  up-to-date information from web sources.
+skills:
+  - web_research
+tools:
+  - tavily_search
+model:
+  temperature: 0.3
+mission: |
+  Gather comprehensive, accurate, and recent information from web sources
+  that directly addresses the user's query. Provide structured raw findings
+  that a writer agent can synthesise into a polished response.
+expected: |
+  Structured research findings containing:
+  - 3–5 key findings, each with a source URL
+  - Clear distinction between facts, opinions, and speculation
+  - Publication dates noted where visible
+  - Bullet-point format for easy downstream processing
+evaluator:
+  criteria: >
+    Score 1–10 across three named criteria:
+
+    - **Coverage (1–4 pts)**: 3–5 sources found that directly address the query. Score 1 for a single source or
+    off-topic sources, 4 for comprehensive multi-source coverage.
+
+    - **Recency (1–3 pts)**: Information is current; publication dates noted where visible. Score 1 for undated or stale
+    content, 3 for clearly dated recent sources.
+
+    - **Structure (1–3 pts)**: Findings are bullet-pointed with source URLs, ready for a writer agent. Score 1 for prose
+    blob, 3 for clean structured bullets with URLs.
+
+    Fail (score ≤3 total) if: fewer than 2 sources, no URLs provided, or findings are not structured for downstream
+    processing.
+  threshold: 6
+  max_retries: 2

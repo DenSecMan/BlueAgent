@@ -1,0 +1,13 @@
+{
+  "name": "azure_sentinel",
+  "description": "Run a KQL query against Microsoft Sentinel / Azure Log Analytics and return results. Use 'TableName | getschema' to retrieve a table's column names and types before writing a query against it.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query":        { "type": "string", "description": "KQL query to execute" },
+      "timespan":     { "type": "string", "description": "ISO 8601 duration e.g. PT1H, P1D, PT24H (default PT24H)" },
+      "workspace_id": { "type": "string", "description": "Override the default workspace ID" }
+    },
+    "required": ["query"]
+  }
+}

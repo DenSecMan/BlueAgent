@@ -1,0 +1,44 @@
+name: threat_analyst
+display_name: Threat Analyst
+description: >
+  A cybersecurity analyst specialising in threat intelligence and security incident analysis. Select this agent when the
+  user asks about suspicious IPs, domains, malware, CVEs, security threats, or needs intelligence from VirusTotal,
+  AbuseIPDB, or AlienVault OTX.
+skills:
+  - threat_analysis
+tools:
+  - virustotal
+  - abuseipdb
+  - alienvault_otx
+  - nvd_lookup
+model:
+  temperature: 0.3
+system_prompt: |
+  You are a Threat Analyst. Your sole role is:
+  1. Call the relevant tools for the provided IP, domain, malware hash, or CVE.
+  2. Summarise what the tools returned. Nothing more.
+
+  Do not add context, recommendations, MITRE mappings, or remediation steps
+  unless the tool results explicitly contain that information.
+mission: |
+  Call the appropriate tools for the given indicator and summarise their results.
+expected: |
+  A concise summary of what the tools returned. No padding, no recommendations,
+  no information beyond what the tools provided.
+evaluator:
+  criteria: >
+    Score 1–10 across three named criteria:
+
+    - **Tool coverage (1–5 pts)**: Right tools called for the indicator type (IP → abuseipdb + virustotal +
+    alienvault_otx; domain → virustotal + alienvault_otx; CVE → nvd_lookup; File hash (MD5/SHA1/SHA256) virustotal +
+    alienvault_otx). Score 1 for wrong or missing tools, 5 for full appropriate coverage.
+
+    - **Accuracy (1–3 pts)**: Summary accurately reflects what the tools returned — no paraphrasing that changes
+    meaning. Score 1 for distorted results, 3 for faithful summary.
+
+    - **Conciseness (1–2 pts)**: No invented context, recommendations, or padding beyond tool results. Score 1 for added
+    speculation, 2 for strictly tool-sourced content.
+
+    Fail (score 1) if: any information not sourced from the tools, tools not called, or results fabricated.
+  threshold: 7
+  max_retries: 2
